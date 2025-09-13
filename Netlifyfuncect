@@ -1,0 +1,52 @@
+// verify-checkout.js
+// Env vars required: STRIPE_SECRET_KEY, FIREBASE_SERVICE_ACCOUNT (JSON string), FIREBASE_PROJECT_ID
+
+const stripeLib = require('stripe');
+const admin = require('firebase-admin');
+
+exports.handler = async (event) => {
+  try {
+    const body = JSON.parse(event.body || '{}');
+    const { session_id, idToken } = body;
+    if (!session_id || !idToken) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Missing session_id or idToken' }) };
+    }
+
+    // init stripe
+    const stripe = stripeLib(process.env.STRIPE_SECRET_KEY);
+
+    // fetch session
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+    if (!session || session.payment_status !== 'paid') {
+      return { statusCode: 402, body: JSON.stringify({ error: 'Payment not completed' }) };
+    }
+
+    // Init firebase admin
+    if (!admin.apps.length) {
+      const svc = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      admin.initializeApp({
+        credential: admin.credential.cert(svc),
+        projectId: process.env.FIREBASE_PROJECT_ID
+      });
+    }
+
+    // verify idToken to get uid and email
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const userEmail = decoded.email;
+
+    // optional security check: ensure stripe session email matches the logged in user email
+    if (session.customer_details && session.customer_details.email && session.customer_details.email !== userEmail) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'Stripe email does not match user email' }) };
+    }
+
+    // set pro flag in Firestore
+    const db = admin.firestore();
+    await db.collection('streaks').doc(uid).set({ pro: true }, { merge: true });
+
+    return { statusCode: 200, body: JSON.stringify({ ok: true }) };
+  } catch (err) {
+    console.error('verify-checkout error', err);
+    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+  }
+};
